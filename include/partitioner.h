@@ -123,15 +123,15 @@ class graph_partitioner {
     _dis = new std::uniform_real_distribution<>(0, 1);
     if (load_disk) {
       if (std::string(data_type) == std::string("uint8")) {
-        load_disk_index<uint8_t>(indexName, BS);
+        // load_disk_index<uint8_t>(indexName, BS);
+        batch_load_disk_index<uint8_t>(indexName, BS);
       } else if (std::string(data_type) == std::string("float")) {
-        load_disk_index<float>(indexName, BS);
+        // load_disk_index<float>(indexName, BS);
+        batch_load_disk_index<float>(indexName, BS);
       } else {
         std::cout << "not support type" << std::endl;
         exit(-1);
       }
-    } else {
-      load_vamana(indexName);
     }
     cursize = _nd / 1000;
 
@@ -146,56 +146,26 @@ class graph_partitioner {
                   << std::endl;
         exit(-1);
       }
-      relayout_adj(_freq_nei_list, full_graph);
+      // relayout_adj(_freq_nei_list, full_graph);
     }
-    // copy to direct_graph
-    direct_graph.clear();
-    direct_graph.resize(full_graph.size());
-#pragma omp parallel for
-    for (unsigned i = 0; i < _nd; i++) {
-      direct_graph[i].assign(full_graph[i].begin(), full_graph[i].end());
-    }
-    // cut graph
-    if(cut !=INF){
-      std::cout << "direct graph will be cut, it degree become "<<cut << std::endl;
-    }
-#pragma omp parallel for
-    for (unsigned i = 0; i < _nd; i++) {
-      if (cut < direct_graph[i].size()) {
-        direct_graph[i].resize(cut);
-      }
-    }
-    // reverse graph
-    std::vector<std::mutex> ms(_nd);
-    reverse_graph.resize(_nd);
-#pragma omp parallel for shared(reverse_graph, direct_graph)
-    for (unsigned i = 0; i < _nd; i++) {
-      for (unsigned j = 0; j < direct_graph[i].size(); j++) {
-        std::lock_guard<std::mutex> lock(ms[direct_graph[i][j]]);
-        reverse_graph[direct_graph[i][j]].emplace_back(i);
-      }
-    }
-    std::cout << "reverse graph done." << std::endl;
+
+    // reverse graph(batch模式时注释)
+//     std::vector<std::mutex> ms(_nd);
+//     reverse_graph.resize(_nd);
+// #pragma omp parallel for shared(reverse_graph, full_graph)
+//     for (unsigned i = 0; i < _nd; i++) {
+//       for (unsigned j = 0; j < full_graph[i].size(); j++) {
+//         std::lock_guard<std::mutex> lock(ms[full_graph[i][j]]);
+//         reverse_graph[full_graph[i][j]].emplace_back(i);
+//       }
+//     }
+//     std::cout << "reverse graph done." << std::endl;
+
     for (unsigned i = 0; i < _partition_number; i++) {
+      if (i % 10000 == 0)
+        std::cout << "pmutex pushback " << i << "/" << _partition_number << std::endl;
       pmutex.push_back(std::make_unique<std::mutex>());
     }
-    //   undirect_graph.resize(_nd);
-    //     E = 0;
-    // #pragma omp parallel for schedule(dynamic, 100)
-    //     for (unsigned i = 0; i < _nd; i++) {
-    //       std::set<unsigned> ne;
-    //       for (auto n : direct_graph[i]) {
-    //         ne.insert(n);
-    //       }
-    //       for (auto n : reverse_graph[i]) {
-    //         ne.insert(n);
-    //       }
-    //       for (auto n : ne) {
-    //         undirect_graph[i].push_back(n);
-    //       }
-    // #pragma omp atomic
-    //       E += undirect_graph[i].size();
-    //     }
   }
 
   void cout_step() {
@@ -210,70 +180,7 @@ class graph_partitioner {
       std::cout.flush();
     }
   }
-  /**
-   * load vamana graph index from disk
-   * @param filename
-   */
-  void load_vamana(const char *filename, bool sample = false) {
-    std::cout << "Reading index file: " << filename << "... " << std::flush;
-    std::ifstream in;
-    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-    try {
-      in.open(filename, std::ios::binary);
-      size_t expected_file_size;
-      in.read((char *)&expected_file_size, sizeof(uint64_t));
-      in.read((char *)&_width, sizeof(unsigned));
-      in.read((char *)&_ep, sizeof(unsigned));
-      std::cout << "Loading vamana index " << filename << "..." << std::flush;
-
-      size_t cc = 0;
-      unsigned nodes = 0;
-      while (in.peek() != EOF) {
-        unsigned k;
-        in.read((char *)&k, sizeof(unsigned));
-        cc += k;
-        ++nodes;
-        std::vector<unsigned> tmp(k);
-        in.read((char *)tmp.data(), k * sizeof(unsigned));
-        direct_graph.emplace_back(tmp);
-        if (nodes % 10000000 == 0) std::cout << "." << std::flush;
-      }
-      if (direct_graph.size() != _nd) {
-        std::cout << "graph vertex size error!\n";
-        exit(-1);
-      }
-      if (sample) {
-        std::cout << "cut adj" << std::endl;
-        for (unsigned i = 0; i < _nd; i++) {
-          std::vector<unsigned> tmp;
-          tmp.reserve(10);
-          for (unsigned j = 0; j < 20 && j < direct_graph[i].size(); j++) {
-            tmp.push_back(direct_graph[i][j]);
-          }
-          direct_graph[i].clear();
-          direct_graph[i].assign(tmp.begin(), tmp.end());
-        }
-      }
-      C = 12;
-      _partition_number = ROUND_UP(_nd, C) / C;
-      reverse_graph.resize(_nd);
-      std::vector<std::mutex> ms(_nd);
-#pragma omp parallel for shared(reverse_graph, direct_graph)
-      for (unsigned i = 0; i < _nd; i++) {
-        for (unsigned j = 0; j < direct_graph[i].size(); j++) {
-          std::lock_guard<std::mutex> lock(ms[direct_graph[i][j]]);
-          reverse_graph[direct_graph[i][j]].emplace_back(i);
-        }
-      }
-      std::cout << "done. Index has " << nodes << " nodes and " << cc << " out-edges" << std::endl;
-      for (unsigned i = 0; i < _partition_number; i++) {
-        pmutex.push_back(std::make_unique<std::mutex>());
-      }
-    } catch (std::system_error &e) {
-      exit(-1);
-    }
-  }
-
+  
   template <typename T>
   void load_disk_index(const char *index_name, int BS = 1) {
     std::cout << "loading disk index file: " << index_name << "... " << std::flush;
@@ -298,6 +205,7 @@ class graph_partitioner {
 
       _partition_number = ROUND_UP(_nd, C) / C;
 
+      std::cout << "_partition_number:" << _partition_number << ",SECTOR_LEN:" << SECTOR_LEN << "max_node_len:" << _max_node_len << std::endl;
       std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(_partition_number * SECTOR_LEN);
       in.open(index_name, std::ios::binary);
       in.seekg(SECTOR_LEN, std::ios::beg);
@@ -307,9 +215,14 @@ class graph_partitioner {
       _u64 des = 0;
 #pragma omp parallel for schedule(dynamic, 1) reduction(+ : des)
       for (unsigned i = 0; i < _partition_number; i++) {
+        if(i % 10000 == 0) 
+          std::cout << "partition" << i << "/" << _partition_number << std::endl;
         std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
         memcpy(sector_buf.get(), mem_index.get() + i * SECTOR_LEN, SECTOR_LEN);
         for (unsigned j = 0; j < C && i * C + j < _nd; j++) {
+          if(i * C + j == 65253360) {
+            std::cout << "add:" << SECTOR_LEN + i * SECTOR_LEN + j * _max_node_len << std::endl;
+          }
           std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(_max_node_len);
           memcpy(node_buf.get(), sector_buf.get() + j * _max_node_len, _max_node_len);
           unsigned &nnbr = *(unsigned *)(node_buf.get() + _dim * sizeof(T));
@@ -326,6 +239,337 @@ class graph_partitioner {
       _partition_number = ROUND_UP(_nd, C) / C;
       std::cout << "_nd: " << _nd << " _dim:" << _dim << " C:" << C << " pn:" << _partition_number << std::endl;
       std::cout << "load index over." << std::endl;
+    } catch (std::system_error &e) {
+      std::cout << "open file " << index_name << " error!" << std::endl;
+      exit(-1);
+    }
+  }
+
+  template <typename T>
+  void compute_in_degree(const char* index_name) {
+    _u64 batch_size = 16 * 1024 * 1024 / 4;
+    std::ifstream in(index_name, std::ios::binary);
+    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+
+    auto meta_pair = get_disk_index_meta(index_name);
+    _u64 nd = meta_pair.first ? meta_pair.second.front() : meta_pair.second[1];
+    _u64 dim = meta_pair.second[1];
+    _u64 max_node_len = meta_pair.second[3];
+    _u64 C = meta_pair.second[4];
+    _u64 partition_number = ROUND_UP(nd, C) / C;
+
+    std::vector<unsigned> in_degree(nd, 0);
+
+    std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(batch_size * SECTOR_LEN);
+    in.seekg(SECTOR_LEN, std::ios::beg);
+    unsigned batch_num = partition_number / batch_size + 1;
+
+    for (unsigned i = 0; i < batch_num; i++) {
+      _u64 current_batch_size = std::min(batch_size, partition_number - i * batch_size);
+      in.read(mem_index.get(), current_batch_size * SECTOR_LEN);
+      std::cout << "batch " << i << "/" << batch_num << std::endl;
+
+  #pragma omp parallel for schedule(dynamic, 1)
+      for (unsigned j = 0; j < current_batch_size; j++) {
+        std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+        memcpy(sector_buf.get(), mem_index.get() + j * SECTOR_LEN, SECTOR_LEN);
+
+        for (unsigned k = 0; k < C && i * batch_size * C + j * C + k < nd; k++) {
+          _u64 node_id = i * batch_size * C + j * C + k;
+          std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(max_node_len);
+          memcpy(node_buf.get(), sector_buf.get() + k * max_node_len, max_node_len);
+
+          unsigned& nnbr = *(unsigned*)(node_buf.get() + dim * sizeof(T));
+          unsigned* nhood_buf = (unsigned*)(node_buf.get() + dim * sizeof(T) + sizeof(unsigned));
+
+          for (unsigned l = 0; l < nnbr; l++) {
+            unsigned dst = nhood_buf[l];
+  #pragma omp atomic
+            in_degree[dst]++;
+          }
+        }
+      }
+    }
+
+    in.close();
+
+    // 输出入度
+    std::ofstream deg_out("in_degree.txt");
+    for (size_t i = 0; i < in_degree.size(); ++i) {
+      deg_out << i << " " << in_degree[i] << "\n";
+    }
+    deg_out.close();
+
+    std::cout << "Finished writing in-degree to in_degree.txt" << std::endl;
+  }
+
+  template <typename T>
+  void batch_write_reverse_index_with_offset(const char *index_name,
+                                            const char *reverse_output_name,
+                                            const char *offset_output_name = "reverse_offset.bin") {
+    _u64 batch_size = 16 * 1024 * 1024 / 4;
+    std::cout << "building reverse index from " << index_name << " with batch size " << batch_size << "... " << std::flush;
+
+    std::ifstream in(index_name, std::ios::binary);
+    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+
+    auto meta_pair = get_disk_index_meta(index_name);
+    _u64 nd = meta_pair.first ? meta_pair.second.front() : meta_pair.second[1];
+    _u64 dim = meta_pair.second[1];
+    _u64 max_node_len = meta_pair.second[3];
+    _u64 C = meta_pair.second[4];
+    _u64 partition_number = ROUND_UP(nd, C) / C;
+    _u64 sector_len = SECTOR_LEN;
+
+  //   std::ofstream tmp_edges("/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/tmp_reverse_edges.txt");
+  //   std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(batch_size * sector_len);
+  //   in.seekg(sector_len, std::ios::beg);
+  //   unsigned batch_num = partition_number / batch_size + 1;
+
+  //   for (unsigned i = 0; i < batch_num; i++) {
+  //     std::cout << "batch:" << i << std::endl;
+  //     _u64 current_batch_size = std::min(batch_size, partition_number - i * batch_size);
+  //     in.read(mem_index.get(), current_batch_size * sector_len);
+
+  // #pragma omp parallel for schedule(dynamic, 1)
+  //     for (unsigned j = 0; j < current_batch_size; j++) {
+  //       if(j % 10000 == 0) std::cout << "j: " << j << " ";
+  //       std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(sector_len);
+  //       memcpy(sector_buf.get(), mem_index.get() + j * sector_len, sector_len);
+
+  //       for (unsigned k = 0; k < C && i * batch_size * C + j * C + k < nd; k++) {
+  //         _u64 node_id = i * batch_size * C + j * C + k;
+  //         std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(max_node_len);
+  //         memcpy(node_buf.get(), sector_buf.get() + k * max_node_len, max_node_len);
+
+  //         unsigned &nnbr = *(unsigned *)(node_buf.get() + dim * sizeof(T));
+  //         unsigned *nhood_buf = (unsigned *)(node_buf.get() + (dim * sizeof(T)) + sizeof(unsigned));
+
+  // #pragma omp critical
+  //         {
+  //           for (unsigned l = 0; l < nnbr; l++) {
+  //             unsigned dst = nhood_buf[l];
+  //             tmp_edges << dst << " " << node_id << "\n";
+  //           }
+  //         }
+  //       }
+  //     }
+  //     std::cout << std::endl;
+  //   }
+  //   in.close();
+  //   tmp_edges.close();
+
+  //   std::cout << "Finished extracting edges. Now sorting..." << std::endl;
+  //   system("sort -n -k1,1 /mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/tmp_reverse_edges.txt > /mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/sorted_reverse_edges.txt");
+
+    // 第二阶段：顺序构建反向图，同时记录 offset
+    std::ifstream sorted_in("/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/sorted_reverse_edges.txt");
+    std::ofstream reverse_out(reverse_output_name, std::ios::binary);
+    std::ofstream offset_out(offset_output_name, std::ios::binary);
+
+    std::vector<uint64_t> offsets(nd, 0);
+    uint64_t current_offset = 0;
+
+    unsigned current_dst = 0;
+    std::vector<unsigned> neighbors;
+    unsigned dst, src;
+    _u64 written_nodes = 0;
+
+    while (sorted_in >> dst >> src) {
+      while (written_nodes < dst) {
+        unsigned degree = 0;
+        offsets[written_nodes] = current_offset;
+        reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
+        current_offset += sizeof(unsigned);
+        written_nodes++;
+      }
+
+      if (dst != current_dst) {
+        if (!neighbors.empty()) {
+          unsigned degree = neighbors.size();
+          offsets[current_dst] = current_offset;
+          reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
+          reverse_out.write(reinterpret_cast<const char *>(neighbors.data()), degree * sizeof(unsigned));
+          current_offset += sizeof(unsigned) + degree * sizeof(unsigned);
+          neighbors.clear();
+          written_nodes++;
+        }
+        current_dst = dst;
+      }
+
+      neighbors.push_back(src);
+    }
+
+    // 写最后一个结点
+    if (!neighbors.empty()) {
+      unsigned degree = neighbors.size();
+      offsets[current_dst] = current_offset;
+      reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
+      reverse_out.write(reinterpret_cast<const char *>(neighbors.data()), degree * sizeof(unsigned));
+      current_offset += sizeof(unsigned) + degree * sizeof(unsigned);
+      written_nodes++;
+    }
+
+    // 补全没有入边的结点
+    while (written_nodes < nd) {
+      offsets[written_nodes] = current_offset;
+      unsigned degree = 0;
+      reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
+      current_offset += sizeof(unsigned);
+      written_nodes++;
+    }
+
+    sorted_in.close();
+    reverse_out.close();
+
+    // 写 offset 文件
+    offset_out.write(reinterpret_cast<const char *>(offsets.data()), nd * sizeof(uint64_t));
+    offset_out.close();
+
+    std::cout << "Reverse graph written to " << reverse_output_name << std::endl;
+    std::cout << "Offset index written to " << offset_output_name << std::endl;
+  }
+
+  template <typename T>
+  void validate_reverse_graph(const std::string& index_path,
+                            const std::string& reverse_graph_bin="/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin",
+                            const std::string& reverse_offset_bin="/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_offset.bin") {
+    
+    std::ifstream rev_graph_in(reverse_graph_bin, std::ios::binary);
+    std::ifstream rev_offset_in(reverse_offset_bin, std::ios::binary);
+    std::ifstream index_in(index_path, std::ios::binary);
+
+    if (!rev_graph_in || !rev_offset_in || !index_in) {
+      std::cerr << "Failed to open one or more files.\n";
+      return;
+    }
+
+    // === 获取图元信息 ===
+    auto meta_pair = get_disk_index_meta(index_path);
+    _u64 nd = meta_pair.first ? meta_pair.second.front() : meta_pair.second[1];
+    _u64 dim = meta_pair.second[1];
+    _u64 max_node_len = meta_pair.second[3];
+    _u64 C = meta_pair.second[4];
+    _u64 partition_number = (nd + C - 1) / C;
+    _u64 sector_len = SECTOR_LEN;
+
+    // === 加载 offset ===
+    std::vector<uint64_t> offsets(nd + 1);
+    rev_offset_in.read(reinterpret_cast<char*>(offsets.data()), nd * sizeof(uint64_t));
+    offsets[nd] = static_cast<uint64_t>(-1); // sentinel
+
+    index_in.seekg(sector_len, std::ios::beg); // skip metadata
+
+    size_t total = 0, errors = 0;
+
+    for (size_t p = 0; p < partition_number; ++p) {
+      if (p % 1000 == 0)
+        std::cout << "page: " << p << "/" << partition_number << std::endl;
+
+      std::vector<char> sector_buf(sector_len);
+      index_in.read(sector_buf.data(), sector_len);
+
+      for (size_t k = 0; k < C && p * C + k < nd; ++k) {
+        size_t node_id = p * C + k;
+        char* node_ptr = sector_buf.data() + k * max_node_len;
+
+        uint32_t nnbr = *reinterpret_cast<uint32_t*>(node_ptr + dim * sizeof(T));
+        uint32_t* nhood = reinterpret_cast<uint32_t*>(node_ptr + dim * sizeof(T) + sizeof(uint32_t));
+
+        for (uint32_t i = 0; i < nnbr; ++i) {
+          uint32_t dst = nhood[i];
+          total++;
+
+          uint64_t offset = offsets[dst];
+          uint32_t degree;
+          rev_graph_in.seekg(offset, std::ios::beg);
+          rev_graph_in.read(reinterpret_cast<char*>(&degree), sizeof(uint32_t));
+
+          std::vector<uint32_t> rev_nbrs(degree);
+          if (degree > 0)
+            rev_graph_in.read(reinterpret_cast<char*>(rev_nbrs.data()), degree * sizeof(uint32_t));
+
+          if (std::find(rev_nbrs.begin(), rev_nbrs.end(), node_id) == rev_nbrs.end()) {
+            errors++;
+            if (errors <= 10) {
+              std::cerr << "Missing reverse edge: " << node_id << " → " << dst << std::endl;
+            }
+          }
+        }
+      }
+    }
+
+    std::cout << "Validation complete. Total edges: " << total
+              << ", missing reverse edges: " << errors
+              << ", error rate: " << (100.0 * errors / total) << "%" << std::endl;
+  }
+
+
+  template <typename T>
+  void batch_load_disk_index(const char *index_name, int BS = 1) {
+    _u64 batch_size = 16 * 1024 * 1024 / 4;   //限制64GB内存
+    std::cout << "loading disk index file" << index_name << "with batch size" << batch_size << "... " << std::flush;
+    std::ifstream in;
+    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+
+    try {
+      _u64 expected_npts;
+      auto meta_pair = get_disk_index_meta(index_name);
+
+      if (meta_pair.first) {
+        // new version
+        expected_npts = meta_pair.second.front();
+      } else {
+        expected_npts = meta_pair.second[1];
+      }
+      _nd = expected_npts;
+      _dim = meta_pair.second[1];
+
+      _max_node_len = meta_pair.second[3];
+      C = meta_pair.second[4];
+
+      _partition_number = ROUND_UP(_nd, C) / C;
+
+      std::cout << "_partition_number:" << _partition_number << ",SECTOR_LEN:" << SECTOR_LEN << std::endl;
+      // std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(batch_size * SECTOR_LEN);
+      // in.open(index_name, std::ios::binary);
+      // in.seekg(SECTOR_LEN, std::ios::beg);
+      // full_graph.resize(_nd);
+
+//       unsigned batch_num = _partition_number / batch_size + 1;
+//       _u64 des = 0;
+//       for(unsigned i = 0; i < batch_num; i++){
+//         _u64 current_batch_size = std::min(batch_size, _partition_number - i * batch_size);
+//         in.read(mem_index.get(), current_batch_size * SECTOR_LEN);
+        
+//         std::cout << "batch " << i << "/" << batch_num << std::endl;
+// #pragma omp parallel for schedule(dynamic, 1) reduction(+ : des)
+//         for (unsigned j = 0; j < current_batch_size; j++) {
+//           if(j % 10000 == 0) 
+//             std::cout << "partition" << j << "/" << current_batch_size << std::endl;
+//           std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+//           memcpy(sector_buf.get(), mem_index.get() + j * SECTOR_LEN, SECTOR_LEN);
+//           for (unsigned k = 0; k < C && i * batch_size * C + j * C + k < _nd; k++) {
+//             std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(_max_node_len);
+//             memcpy(node_buf.get(), sector_buf.get() + k * _max_node_len, _max_node_len);
+//             unsigned &nnbr = *(unsigned *)(node_buf.get() + _dim * sizeof(T));
+//             unsigned *nhood_buf = (unsigned *)(node_buf.get() + (_dim * sizeof(T)) + sizeof(unsigned));
+//             std::vector<unsigned> tmp(nnbr);
+//             des += nnbr;
+//             memcpy((char *)tmp.data(), nhood_buf, nnbr * sizeof(unsigned));
+//             full_graph[i * batch_size * C + j * C + k].assign(tmp.begin(), tmp.end());
+//           }
+//         }
+//       }
+      
+      // in.close();
+      
+      // std::cout << "avg degree: " << (double)des / _nd << std::endl;
+      // mem_index.reset();
+      C = (SECTOR_LEN * BS) / _max_node_len;
+      _partition_number = ROUND_UP(_nd, C) / C;
+      std::cout << "_nd: " << _nd << " _dim:" << _dim << " C:" << C << " pn:" << _partition_number << std::endl;
+      // std::cout << "load index over." << std::endl;
     } catch (std::system_error &e) {
       std::cout << "open file " << index_name << " error!" << std::endl;
       exit(-1);
@@ -453,7 +697,15 @@ class graph_partitioner {
     unsigned res = INF;
     std::unordered_map<unsigned, unsigned> pcount;
     unsigned tpid = 0;
-    for (auto n : direct_graph[i]) {
+    // for (auto n : direct_graph[i]) {
+    //   unsigned pid = id2pid[n];
+    //   if (pid == INF) continue;
+    //   pcount[pid] = pcount[pid] + 1;
+    //   if (tpid < pid) {
+    //     tpid = pid;
+    //   }
+    // }
+    for (auto n : full_graph[i]) {
       unsigned pid = id2pid[n];
       if (pid == INF) continue;
       pcount[pid] = pcount[pid] + 1;
@@ -469,6 +721,64 @@ class graph_partitioner {
         tpid = pid;
       }
     }
+    // for(unsigned j = 0; j < full_graph.size(); j++){
+    //   for(unsigned k = 0; k < full_graph[j].size(); k++){
+    //     if(full_graph[j][k] == i) {
+    //       unsigned pid = id2pid[j];
+    //       if (pid == INF) continue;
+    //     pcount[pid] = pcount[pid] + 1;
+    //     if (tpid < pid) {
+    //       tpid = pid;
+    //     }
+    //     }
+    //   }
+    // }
+    for (auto c : pcount) {
+      unsigned pid = c.first;
+      float cnt = c.second;
+      std::lock_guard<std::mutex> lock(*pmutex[pid]);
+      double s = _partition[pid].size();
+      cnt *= (1 - s / C);
+      if (cnt > maxn && _partition[pid].size() < C) {
+        res = pid;
+        maxn = cnt;
+      }
+    }
+    pcount.clear();
+    if (res == INF) {
+#pragma omp atomic
+      select_free++;
+      res = getUnfilled();
+    }
+    select_partition_cnt++;
+    return res;
+  }
+
+  unsigned batch_select_partition(unsigned i) {
+#pragma omp atomic
+    select_nums++;
+
+    float maxn = 0.0;
+    unsigned res = INF;
+    std::unordered_map<unsigned, unsigned> pcount;
+    unsigned tpid = 0;
+    for (auto m : batch_graph[i]) {
+      unsigned pid = id2pid[m];
+      if (pid == INF) continue;
+      pcount[pid] = pcount[pid] + 1;
+      if (tpid < pid) {
+        tpid = pid;
+      }
+    }
+    for (auto m : batch_reverse_graph[i]) {
+      unsigned pid = id2pid[m];
+      if (pid == INF) continue;
+      pcount[pid] = pcount[pid] + 1;
+      if (tpid < pid) {
+        tpid = pid;
+      }
+    }
+   
     for (auto c : pcount) {
       unsigned pid = c.first;
       float cnt = c.second;
@@ -504,6 +814,7 @@ class graph_partitioner {
     for (unsigned i = 0; i < _nd; i++) {
       id2pid[i] = INF;
     }
+    std::cout << "id2pid init over" << std::endl;
     _partition.clear();
     _partition.resize(_partition_number);
     std::unordered_set<unsigned> vis;
@@ -517,6 +828,13 @@ class graph_partitioner {
       init_stream.resize(_nd);
       std::iota(init_stream.begin(), init_stream.end(), 0);
     }
+    std::cout << "init_stream over" << std::endl;
+
+    for(int i = 0; i < 10; i++) {
+      std::cout << "init_stream[" << i << "]:" << init_stream[i] << " ";
+    }
+    std::cout << std::endl;
+
     _lock_nodes.clear();
     _lock_pids.clear();
     _lock_nodes.resize(_nd, false);
@@ -541,11 +859,19 @@ class graph_partitioner {
         _lock_pids[pid] = true;
       }
       for (unsigned s : full_graph[i]) {
+        if(i == 34656077) {
+          std::cout << "init stage, full_graph[0]:"; 
+          for(int r = 0; r < full_graph[i].size(); r++) {
+            std::cout << full_graph[i][r] << " ";
+          }
+          std::cout << std::endl;
+        }
         if (vis.count(s)) continue;
         if (_partition[pid].size() == C) {
           ++pid;
           break;
         }
+        // std::cout << "s:" << s << ", pid:" << pid << std::endl;
         _partition[pid].push_back(s);
         id2pid[s] = pid;
         vis.insert(s);
@@ -566,9 +892,16 @@ class graph_partitioner {
 
     std::cout << "init over." << std::endl;
 
+    for(int i = 0; i < 10; i++) {
+      std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+    }
+    std::cout << std::endl;
+
     for (int i = 0; i < k; i++) {
+      select_partition_cnt = 0;
+      std::cout << "gp time: " << i << std::endl;
       select_free = 0;
-      graph_partition_LDG();
+      graph_partition_LDG(i);
       std::cout << "select free: " << (double)select_free / _partition_number << std::endl;
       partition_statistic();
       auto ivf_file_name = std::string(filename) + std::string(".ivf") + std::to_string(i + 1);
@@ -579,7 +912,269 @@ class graph_partitioner {
     std::cout << "select pid nums" << select_nums << " get unfilled partition nums: " << getUnfilled_nums << std::endl;
     std::cout << "total ivf time: " << ivf_time << std::endl;
   }
-  void graph_partition_LDG() {
+
+  template <typename T>
+  void load_batch_graph(int batch_no, int batch_size, std::vector<unsigned> stream, 
+                        const std::string& index_path, std::vector<uint64_t> offsets, const std::string& reverse_graph_bin) {
+    std::cout << "load batch graph start" << std::endl;
+    batch_graph.clear();
+    batch_reverse_graph.clear();
+    std::ifstream rev_graph_in(reverse_graph_bin, std::ios::binary);
+    std::ifstream index_in(index_path, std::ios::binary);
+    // index_in.seekg(SECTOR_LEN, std::ios::beg);
+
+    auto meta_pair = get_disk_index_meta(index_path);
+    _u64 nd = meta_pair.first ? meta_pair.second.front() : meta_pair.second[1];
+    _u64 dim = meta_pair.second[1];
+    _u64 max_node_len = meta_pair.second[3];
+    _u64 C = meta_pair.second[4];
+    _u64 partition_number = (nd + C - 1) / C;
+    _u64 sector_len = SECTOR_LEN;
+    if(batch_no == 0) {
+      std::cout << "nd: " << nd << ", dim: " << dim << ", max_node_len: " << max_node_len 
+                << ", _max_node_len: " << _max_node_len
+                << ", C: " << C << ", partition_number: " << partition_number 
+                << ", sector_len: " << sector_len << std::endl;
+    }
+
+    int cur_batch_size = (batch_size > nd - batch_no * batch_size) ? nd - batch_no * batch_size : batch_size;
+    // std::cout << "batch_size:" << batch_size << std::endl; 
+    // std::cout << "cur_batch_size:" << cur_batch_size << std::endl; 
+    batch_graph.resize(cur_batch_size);
+    batch_reverse_graph.resize(cur_batch_size);
+    // std::cout << "batch graph resize done." << std::endl;
+    for(int i = 0; i < cur_batch_size; i++) {
+      // std::cout << "i:" << i << std::endl;
+      // std::cout << "stream size:" << stream.size() << std::endl;
+      // std::cout << "batch_no * batch_size + i:" << batch_no * batch_size + i << std::endl;
+      unsigned node_id = stream[batch_no * batch_size + i];
+      unsigned page_id = node_id / C;
+      if(batch_no == 0 && i == 0)
+        std::cout << "node_id:" << node_id << ", page_id:" << page_id << std::endl;
+      // std::cout << "node id:" << node_id << ", page id:" << page_id << std::endl;
+      uint64_t rev_graph_offset = offsets[node_id];
+      // std::cout << "rev_graph_offset:" << rev_graph_offset << std::endl;
+      uint32_t degree;
+      rev_graph_in.seekg(rev_graph_offset, std::ios::beg);
+      rev_graph_in.read(reinterpret_cast<char*>(&degree), sizeof(uint32_t));
+      // std::cout << "degree:" << degree << std::endl;
+      std::vector<uint32_t> rev_nbrs(degree);
+      if (degree > 0)
+        rev_graph_in.read(reinterpret_cast<char*>(rev_nbrs.data()), degree * sizeof(uint32_t));
+      batch_reverse_graph[i] = rev_nbrs;
+      // std::cout << "batch reverse graph done." << std::endl;
+
+      std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+      index_in.seekg(SECTOR_LEN + page_id * sector_len, std::ios::beg);
+      index_in.read(sector_buf.get(), SECTOR_LEN);
+      
+      std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(_max_node_len);
+      memcpy(node_buf.get(), sector_buf.get() + (node_id % C) * _max_node_len, _max_node_len);
+
+      if(node_id == 65253360)
+        std::cout << "add: " << SECTOR_LEN + page_id * sector_len + (node_id % C) * max_node_len << std::endl;
+
+      unsigned &nnbr = *(unsigned *)(node_buf.get() + _dim * sizeof(T));
+      unsigned *nhood_buf = (unsigned *)(node_buf.get() + (_dim * sizeof(T)) + sizeof(unsigned));
+      std::vector<unsigned> tmp(nnbr);
+      // std::cout << "nnbr:" << nnbr << std::endl;
+      memcpy((char *)tmp.data(), nhood_buf, nnbr * sizeof(unsigned));
+      for (uint32_t j = 0; j < nnbr; ++j) {
+        uint32_t nbr = tmp[j];
+        // batch_graph[i].emplace_back(nbr);
+        if(node_id == 65253360) std::cout << nbr << " ";
+      }
+      batch_graph[i].assign(tmp.begin(), tmp.end());
+      // std::cout << "batch graph done." << std::endl;
+    }
+    index_in.close();
+    rev_graph_in.close();
+    std::cout << "load batch graph done." << "batch graph size:" << batch_graph.size() 
+              << ", batch reverse graph size:" << batch_reverse_graph.size() << std::endl;
+  }
+
+  // graph partition
+  template <typename T>
+  void batch_graph_partition(const char *filename, int k, const std::string& index_path,
+                              const std::string& reverse_offset_bin, const std::string& reverse_graph_bin, int lock_nums = 0) {
+    unsigned batch_size = 5000000;
+    unsigned batch_num = (_nd + batch_size - 1) / batch_size;
+
+    std::ifstream rev_offset_in(reverse_offset_bin, std::ios::binary);
+    std::vector<uint64_t> offsets(_nd + 1);
+    rev_offset_in.read(reinterpret_cast<char*>(offsets.data()), _nd * sizeof(uint64_t));
+    offsets[_nd] = static_cast<uint64_t>(-1); // sentinel
+    rev_offset_in.close();
+
+    for (unsigned i = 0; i < _nd; i++) {
+      id2pid[i] = INF;
+    }
+    std::cout << "id2pid init over" << std::endl;
+
+    _partition.clear();
+    _partition.resize(_partition_number);
+    std::unordered_set<unsigned> vis;
+    std::vector<unsigned> init_stream;
+    init_stream.reserve(_nd);
+    if (!_freq_list.empty()) {
+      std::cout << "use freq list" << std::endl;
+      for (auto p : _freq_list) {
+        init_stream.emplace_back(p.first);
+      }
+    } else {
+      init_stream.resize(_nd);
+      std::iota(init_stream.begin(), init_stream.end(), 0);
+    }
+
+    std::cout << "init_stream over" << ", init_stream size:" << init_stream.size() << std::endl;
+    for(int i = 0; i < 10; i++) {
+      std::cout << "init_stream[" << i << "]:" << init_stream[i] << " ";
+    }
+    std::cout << std::endl;
+
+    _lock_nodes.clear();
+    _lock_pids.clear();
+    _lock_nodes.resize(_nd, false);
+    _lock_pids.resize(_partition_number, false);
+    unsigned pid = 0;
+    vis.clear();
+    // full_graph.resize(_nd);
+
+    if (lock_nums) {
+      std::cout << "lock first " << lock_nums << " nodes at init stage." << std::endl;
+    }
+    int iteration = 0;
+    for (auto i : init_stream) {
+      // std::cout << "A" << std::endl;
+      if(iteration % batch_size == 0) 
+        load_batch_graph<T>(iteration / batch_size, batch_size, init_stream, index_path, offsets, reverse_graph_bin);
+
+      if (vis.count(i)) {
+        lock_nums--;
+        iteration++;
+        continue;  // has insert into partition
+      }
+      if (_partition[pid].size() == C) {
+        ++pid;
+      }
+      vis.insert(i);
+      _partition[pid].push_back(i);
+      id2pid[i] = pid;
+      if (lock_nums > 0) {
+        _lock_pids[pid] = true;
+      }
+      
+      // std::cout << "full graph i size:" << full_graph[i].size() << std::endl;
+
+      for (unsigned s : batch_graph[iteration % batch_size]) {
+        // if(iteration == 0) {
+        //   std::cout << "init stage, batch_graph[0]:";
+        //   for(int r = 0; r < batch_graph[iteration % batch_size].size(); r++) {
+        //     std::cout << batch_graph[iteration % batch_size][r] << " ";
+        //   }
+        //   std::cout << std::endl;
+        // }
+        if (vis.count(s)) continue;
+        if (_partition[pid].size() == C) {
+          ++pid;
+          break;
+        }
+        // std::cout << "s:" << s << ", pid:" << pid << std::endl;
+        _partition[pid].push_back(s);
+        id2pid[s] = pid;
+        vis.insert(s);
+      }
+      if (lock_nums) --lock_nums;
+      iteration++;
+    }
+    int s = 0;
+    for (unsigned i = 0; i < _partition_number; i++) {
+      if (!_lock_pids[i]) break;
+      for (unsigned s : _partition[i]) {
+        _lock_nodes[s] = true;
+      }
+      s++;
+    }
+    if (_lock_pids[0]) {
+      std::cout << "finally, it locks partition nums: " << s << " locks nodes num: " << s * C << std::endl;
+    }
+
+    std::cout << "init over." << std::endl;
+
+    for(int i = 0; i < 10; i++) {
+      std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // print_memory_breakdown();
+    for (int i = 0; i < k; i++) {
+      std::cout << "gp time: " << i << std::endl;
+      free_q.clear();
+#pragma omp parallel for
+      for (unsigned i = 0; i < _partition_number; i++) {
+        // if (_lock_pids[i]) continue;
+        _partition[i].clear();
+        free_q.push(i);
+      }
+      cur = 0;
+      std::cout << "start" << std::endl;
+      std::vector<unsigned> stream(_nd);
+      std::iota(stream.begin(), stream.end(), 0);
+
+      // 使用固定种子初始化随机引擎
+      std::default_random_engine rng(42 + i);  // 42 是一个示例，你可以用任何固定的整数
+      std::shuffle(stream.begin(), stream.end(), rng);
+      std::cout << "stream: ";
+      for(int j = 0; j < 10; j++) {
+        std::cout << stream[j] << " ";
+      }
+      std::cout << std::endl;
+
+      auto start = omp_get_wtime();
+      // int* loc = new int[_nd];  // 动态分配
+      // std::vector<std::mutex> ms(_nd);
+      for(int j = 0; j < batch_num; j++){
+        std::cout << "batch " << j << " start" << std::endl;
+        load_batch_graph<T>(j, batch_size, stream, index_path, offsets, reverse_graph_bin);
+        if(j == 0) {
+          for(int r = 0; r < 5; r++) {
+            std::cout << "batch_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
+            for(int t = 0; t < batch_graph[r].size(); t++)
+              std::cout << batch_graph[r][t] << " ";
+            std::cout << std::endl;
+          }
+          for(int r = 0; r < 5; r++) {
+            std::cout << "batch_reverse_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
+            for(int t = 0; t < batch_reverse_graph[r].size(); t++)
+              std::cout << batch_reverse_graph[r][t] << " ";
+            std::cout << std::endl;
+          }
+        }
+        batch_graph_partition_LDG(j, batch_size, stream);
+      }
+      auto end = omp_get_wtime();
+      std::cout << "ivf time: " << end - start << " round: " << round << std::endl;
+      ivf_time += end - start;
+      round++;
+
+      select_free = 0;
+      // graph_partition_LDG();
+      std::cout << "select free: " << (double)select_free / _partition_number << std::endl;
+      // partition_statistic();
+      auto ivf_file_name = std::string(filename) + std::string(".ivf") + std::to_string(i + 1);
+      std::cout << "total ivf time: " << ivf_time << std::endl;
+      save_partition(ivf_file_name.c_str());
+      for(int i = 0; i < 10; i++) {
+        std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+      }
+      std::cout << std::endl;
+    }
+    save_partition(filename);
+    std::cout << "select pid nums" << select_nums << " get unfilled partition nums: " << getUnfilled_nums << std::endl;
+    std::cout << "total ivf time: " << ivf_time << std::endl;
+  }
+
+  void graph_partition_LDG(int j) {
     free_q.clear();
 #pragma omp parallel for
     for (unsigned i = 0; i < _partition_number; i++) {
@@ -592,21 +1187,64 @@ class graph_partitioner {
     std::cout << "start" << std::endl;
     std::vector<unsigned> stream(_nd);
     std::iota(stream.begin(), stream.end(), 0);
-    auto rng = std::default_random_engine{};
+    std::default_random_engine rng(42 + j);  // 42 是一个示例，你可以用任何固定的整数
     std::shuffle(std::begin(stream), std::end(stream), rng);
+
+    std::cout << "stream: ";
+    for(int j = 0; j < 10; j++) {
+      std::cout << stream[j] << " ";
+    }
+    std::cout << std::endl;
+
     auto start = omp_get_wtime();
-#pragma omp parallel for schedule(dynamic)
+    for(int r = 0; r < 5; r++) {
+      std::cout << "full_graph " << r << "(" << stream[r] << "):" ;
+      for(int t = 0; t < full_graph[stream[r]].size(); t++)
+        std::cout << full_graph[stream[r]][t] << " ";
+      std::cout << std::endl;
+    }
+    for(int r = 0; r < 5; r++) {
+      std::cout << "reverse_graph " << r << "(" << stream[r] << "):" ;
+      for(int t = 0; t < reverse_graph[stream[r]].size(); t++)
+        std::cout << reverse_graph[stream[r]][t] << " ";
+      std::cout << std::endl;
+    }
+
+#pragma omp parallel for schedule(static, 1)
     for (unsigned i = 0; i < _nd; i++) {
+      if(i % 10000 == 0) std::cout << "sync " << i << "/" << _nd << std::endl;
       size_t n = stream[i];
+      // std::cout << n << " ";
       if (_lock_nodes[n]) continue;
-      sync(n);
+      unsigned pid = sync(n);
+      // std::cout << pid << ", ";
       cout_step();
     }
     auto end = omp_get_wtime();
     std::cout << "ivf time: " << end - start << " round: " << round << std::endl;
     ivf_time += end - start;
     round++;
+
+    for(int i = 0; i < 10; i++) {
+      std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+    }
+    std::cout << std::endl;
   }
+
+  void batch_graph_partition_LDG(int batch_i, int batch_size, std::vector<unsigned> &stream) {
+#pragma omp parallel for schedule(static, 1)
+    for (unsigned i = 0; i < batch_size; i++) {
+      if(batch_i * batch_size + i >= _nd) continue;
+      if((batch_i * batch_size + i) % 10000 == 0) std::cout << "sync " << batch_i * batch_size + i << "/" << _nd << std::endl;
+      size_t n = stream[batch_i * batch_size + i];
+      // std::cout << n << " ";
+      // if (_lock_nodes[n]) continue;
+      unsigned pid = batch_sync(n, i);
+      // std::cout << pid << ", ";
+      cout_step();
+    }
+  }
+
   unsigned sync(unsigned i) {
     unsigned pid = select_partition(i);
     pmutex[pid]->lock();
@@ -628,14 +1266,38 @@ class graph_partitioner {
     return pid;
   }
 
+  unsigned batch_sync(unsigned n, unsigned i) {
+    unsigned pid = batch_select_partition(i);
+    pmutex[pid]->lock();
+
+    while (_partition[pid].size() == C) {
+      pmutex[pid]->unlock();
+      pid = batch_select_partition(i);
+      pmutex[pid]->lock();
+    }
+    _partition[pid].emplace_back(n);
+    id2pid[n] = pid;
+    unsigned s = _partition[pid].size();
+    pmutex[pid]->unlock();
+
+    if (s != C) {
+      free_q.push(pid);
+    }
+
+    return pid;
+  }
+
  private:
   size_t _dim;  // vector dimension
   _u64 _nd;     // vector number
   _u64 _max_node_len;
   unsigned _width;                                  // max out-degree
   unsigned _ep;                                     // seed vertex id
+  int select_partition_cnt = 0;
   std::vector<std::vector<unsigned>> direct_graph;  // neighbor list
   std::vector<std::vector<unsigned>> full_graph;
+  std::vector<std::vector<unsigned>> batch_graph;
+  std::vector<std::vector<unsigned>> batch_reverse_graph;
   unsigned select_free;
   _u64 C;                                                  // partition size threshold
   _u64 _partition_number = 0;                              // the number of partitions

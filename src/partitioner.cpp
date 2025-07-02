@@ -53,6 +53,12 @@ int main(int argc, char **argv) {
   omp_set_num_threads(thead_nums);
   GP::graph_partitioner partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
                                     freq_file, cut);
-  partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  // partitioner.compute_in_degree<uint8_t>(index_file.c_str());
+  // partitioner.batch_write_reverse_index_with_offset<uint8_t>(index_file.c_str(), "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin");                                  
+  // partitioner.validate_reverse_graph<uint8_t>(index_file.c_str());
+  std::string reverse_offset_bin = "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_offset.bin";
+  std::string reverse_graph_bin = "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin";
+  partitioner.batch_graph_partition<uint8_t>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
+  // partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
   return 0;
 }
