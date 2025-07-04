@@ -16,7 +16,8 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options;
   std::string index_file, data_type, gp_file, freq_file;
   unsigned block_size, ldg_times, lock_nums, thead_nums, cut;
-  bool use_disk, visual;
+  bool use_disk, visual, use_batch;
+  std::string reverse_offset_bin, reverse_graph_bin, tmp_edges_filename, sorted_chunks_dir, sorted_reverse_edges_filename;
 
   po::options_description desc{"Arguments"};
   try {
@@ -25,6 +26,16 @@ int main(int argc, char **argv) {
     desc.add_options()("index_file", po::value<std::string>(&index_file)->required(),
                        "diskann diskann index or mem index");
     desc.add_options()("gp_file", po::value<std::string>(&gp_file)->required(), "output gp file");
+    desc.add_options()("reverse_graph_bin", po::value<std::string>(&reverse_graph_bin)->required(),
+                       "reverse graph bin file name");
+    desc.add_options()("reverse_offset_bin", po::value<std::string>(&reverse_offset_bin)->required(),
+                       "reverse graph offset bin file name");
+    desc.add_options()("tmp_edges_filename", po::value<std::string>(&tmp_edges_filename)->required(),
+                       "tmp reverse edges bin file name for batch graph partition");
+    desc.add_options()("sorted_chunks_dir", po::value<std::string>(&sorted_chunks_dir)->required(),
+                       "sorted chunks directory for batch graph partition");
+    desc.add_options()("sorted_reverse_edges_filename", po::value<std::string>(&sorted_reverse_edges_filename)->required(),
+                       "sorted reverse edges bin file name for batch graph partition");                   
     desc.add_options()("freq_file", po::value<std::string>(&freq_file)->default_value(""), "freq_file[optional]");
     desc.add_options()("thread_nums,T", po::value<unsigned>(&thead_nums)->default_value(omp_get_num_procs()),
                        "threads_nums");
@@ -39,6 +50,9 @@ int main(int argc, char **argv) {
     desc.add_options()("visual", po::value<bool>(&visual)->default_value(0),
                        "see real time progress of graph partition");
     desc.add_options()("cut", po::value<unsigned>(&cut)->default_value(INF), "cut adj list, use 3 means graph degree will be cut to 3");
+    desc.add_options()("use_batch", po::value<bool>(&use_batch)->default_value(true),
+                       "Use batch graph partition, default is true, use false for old version graph partition");
+
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -52,13 +66,22 @@ int main(int argc, char **argv) {
   }
   omp_set_num_threads(thead_nums);
   GP::graph_partitioner partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
-                                    freq_file, cut);
+                                    freq_file, cut, use_batch);
   // partitioner.compute_in_degree<uint8_t>(index_file.c_str());
-  // partitioner.batch_write_reverse_index_with_offset<uint8_t>(index_file.c_str(), "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin");                                  
-  // partitioner.validate_reverse_graph<uint8_t>(index_file.c_str());
-  std::string reverse_offset_bin = "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_offset.bin";
-  std::string reverse_graph_bin = "/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin";
-  partitioner.batch_graph_partition<uint8_t>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
-  // partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  // std::cout << "index file: " << index_file << ", data type: " << data_type
+  //           << ", gp file: " << gp_file << ", reverse graph bin: " << reverse_graph_bin
+  //           << ", reverse offset bin: " << reverse_offset_bin
+  //           << ", tmp edges filename: " << tmp_edges_filename
+  //           << ", sorted chunks dir: " << sorted_chunks_dir
+  //           << ", sorted reverse edges filename: " << sorted_reverse_edges_filename
+  //           << std::endl;
+  // partitioner.batch_write_reverse_index_with_offset<uint8_t>(index_file.c_str(), reverse_graph_bin.c_str(), 
+  //                                                           reverse_offset_bin.c_str(), tmp_edges_filename.c_str(), sorted_chunks_dir.c_str(),
+  //                                                           sorted_reverse_edges_filename.c_str());                      
+  // partitioner.validate_reverse_graph<uint8_t>(index_file.c_str(), reverse_graph_bin, reverse_offset_bin);
+  if(use_batch)
+    partitioner.batch_graph_partition<uint8_t>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
+  else
+    partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
   return 0;
 }

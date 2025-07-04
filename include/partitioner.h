@@ -100,7 +100,7 @@ class graph_partitioner {
  public:
   graph_partitioner(const char *indexName, const char *data_type = "uint8",
                     bool load_disk = true, unsigned BS = 1, bool visual = false,
-                    std::string freq_file = std::string(""), unsigned cut = INF) {
+                    std::string freq_file = std::string(""), unsigned cut = INF, bool use_batch = true) {
     _visual = visual;
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
@@ -123,11 +123,11 @@ class graph_partitioner {
     _dis = new std::uniform_real_distribution<>(0, 1);
     if (load_disk) {
       if (std::string(data_type) == std::string("uint8")) {
-        // load_disk_index<uint8_t>(indexName, BS);
-        batch_load_disk_index<uint8_t>(indexName, BS);
+        if(use_batch) batch_load_disk_index<uint8_t>(indexName, BS);
+        else load_disk_index<uint8_t>(indexName, BS);
       } else if (std::string(data_type) == std::string("float")) {
-        // load_disk_index<float>(indexName, BS);
-        batch_load_disk_index<float>(indexName, BS);
+        if(use_batch) batch_load_disk_index<float>(indexName, BS);
+        else load_disk_index<float>(indexName, BS);
       } else {
         std::cout << "not support type" << std::endl;
         exit(-1);
@@ -149,17 +149,20 @@ class graph_partitioner {
       // relayout_adj(_freq_nei_list, full_graph);
     }
 
-    // reverse graph(batch模式时注释)
-//     std::vector<std::mutex> ms(_nd);
-//     reverse_graph.resize(_nd);
-// #pragma omp parallel for shared(reverse_graph, full_graph)
-//     for (unsigned i = 0; i < _nd; i++) {
-//       for (unsigned j = 0; j < full_graph[i].size(); j++) {
-//         std::lock_guard<std::mutex> lock(ms[full_graph[i][j]]);
-//         reverse_graph[full_graph[i][j]].emplace_back(i);
-//       }
-//     }
-//     std::cout << "reverse graph done." << std::endl;
+    if(!use_batch) {
+      // reverse graph
+      std::vector<std::mutex> ms(_nd);
+      reverse_graph.resize(_nd);
+  #pragma omp parallel for shared(reverse_graph, full_graph)
+      for (unsigned i = 0; i < _nd; i++) {
+        for (unsigned j = 0; j < full_graph[i].size(); j++) {
+          std::lock_guard<std::mutex> lock(ms[full_graph[i][j]]);
+          reverse_graph[full_graph[i][j]].emplace_back(i);
+        }
+      }
+      std::cout << "reverse graph done." << std::endl;
+    }
+    
 
     for (unsigned i = 0; i < _partition_number; i++) {
       if (i % 10000 == 0)
@@ -303,16 +306,107 @@ class graph_partitioner {
     std::cout << "Finished writing in-degree to in_degree.txt" << std::endl;
   }
 
+  using Edge = std::pair<unsigned, unsigned>;
+
+  struct EdgeWithFile {
+    unsigned dst;
+    unsigned src;
+    size_t file_index;
+
+    bool operator>(const EdgeWithFile &other) const {
+      return dst > other.dst || (dst == other.dst && src > other.src);
+    }
+  };
+
+  void sort_chunks(const std::string &input_bin_path, size_t chunk_size_bytes, const std::string &chunk_prefix) {
+    std::ifstream in(input_bin_path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot open input file");
+
+    size_t edge_size = sizeof(unsigned) * 2;
+    size_t edges_per_chunk = chunk_size_bytes / edge_size;
+
+    size_t chunk_id = 0;
+    while (!in.eof()) {
+      std::vector<Edge> edges;
+      edges.reserve(edges_per_chunk);
+      unsigned dst, src;
+
+      for (size_t i = 0; i < edges_per_chunk && in.read(reinterpret_cast<char*>(&dst), sizeof(unsigned)); ++i) {
+        if (!in.read(reinterpret_cast<char*>(&src), sizeof(unsigned))) break;
+        edges.emplace_back(dst, src);
+      }
+
+      if (edges.empty()) break;
+      std::sort(edges.begin(), edges.end());
+
+      std::ostringstream oss;
+      oss << chunk_prefix << "_chunk_" << chunk_id << ".bin";
+      std::ofstream chunk_out(oss.str(), std::ios::binary);
+      for (const auto &[d, s] : edges) {
+        chunk_out.write(reinterpret_cast<const char*>(&d), sizeof(unsigned));
+        chunk_out.write(reinterpret_cast<const char*>(&s), sizeof(unsigned));
+      }
+      std::cout << "Sorted and wrote chunk " << chunk_id << " with " << edges.size() << " edges." << std::endl;
+      chunk_id++;
+    }
+    in.close();
+  }
+
+  void merge_sorted_chunks(const std::vector<std::string> &chunk_paths, const std::string &output_path) {
+    std::cout << "Merging " << chunk_paths.size() << " sorted chunks..." << std::endl;
+
+    size_t num_files = chunk_paths.size();
+    std::vector<std::ifstream> streams(num_files);
+
+    std::priority_queue<EdgeWithFile, std::vector<EdgeWithFile>, std::greater<>> min_heap;
+
+    for (size_t i = 0; i < num_files; ++i) {
+      streams[i].open(chunk_paths[i], std::ios::binary);
+      unsigned dst, src;
+      if (streams[i].read(reinterpret_cast<char*>(&dst), sizeof(unsigned)) &&
+          streams[i].read(reinterpret_cast<char*>(&src), sizeof(unsigned))) {
+        min_heap.push({dst, src, i});
+      }
+    }
+
+    std::ofstream out(output_path, std::ios::binary);
+    size_t merged = 0;
+    while (!min_heap.empty()) {
+      EdgeWithFile smallest = min_heap.top();
+      min_heap.pop();
+
+      out.write(reinterpret_cast<const char*>(&smallest.dst), sizeof(unsigned));
+      out.write(reinterpret_cast<const char*>(&smallest.src), sizeof(unsigned));
+      merged++;
+
+      unsigned dst, src;
+      size_t idx = smallest.file_index;
+      if (streams[idx].read(reinterpret_cast<char*>(&dst), sizeof(unsigned)) &&
+          streams[idx].read(reinterpret_cast<char*>(&src), sizeof(unsigned))) {
+        min_heap.push({dst, src, idx});
+      }
+    }
+    std::cout << "Merged total of " << merged << " edges." << std::endl;
+    for (auto &s : streams) s.close();
+    out.close();
+
+    std::cout << "Cleaning up temporary chunk files..." << std::endl;
+    for (const auto &path : chunk_paths) {
+      if (std::remove(path.c_str()) != 0) {
+        std::cerr << "Warning: failed to delete chunk file: " << path << std::endl;
+      }
+    }
+  }
+
   template <typename T>
   void batch_write_reverse_index_with_offset(const char *index_name,
                                             const char *reverse_output_name,
-                                            const char *offset_output_name = "reverse_offset.bin") {
+                                            const char *offset_output_name,
+                                            const char *tmp_edges_filename,
+                                            const char *sorted_chunks_dir,
+                                            const char *sorted_reverse_edges_filename) {
+    std::cout << "Reading index metadata..." << std::endl;
     _u64 batch_size = 16 * 1024 * 1024 / 4;
-    std::cout << "building reverse index from " << index_name << " with batch size " << batch_size << "... " << std::flush;
-
-    std::ifstream in(index_name, std::ios::binary);
-    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-
     auto meta_pair = get_disk_index_meta(index_name);
     _u64 nd = meta_pair.first ? meta_pair.second.front() : meta_pair.second[1];
     _u64 dim = meta_pair.second[1];
@@ -321,73 +415,93 @@ class graph_partitioner {
     _u64 partition_number = ROUND_UP(nd, C) / C;
     _u64 sector_len = SECTOR_LEN;
 
-  //   std::ofstream tmp_edges("/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/tmp_reverse_edges.txt");
-  //   std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(batch_size * sector_len);
-  //   in.seekg(sector_len, std::ios::beg);
-  //   unsigned batch_num = partition_number / batch_size + 1;
+    std::ifstream in(index_name, std::ios::binary);
+    in.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+    in.seekg(sector_len, std::ios::beg);
 
-  //   for (unsigned i = 0; i < batch_num; i++) {
-  //     std::cout << "batch:" << i << std::endl;
-  //     _u64 current_batch_size = std::min(batch_size, partition_number - i * batch_size);
-  //     in.read(mem_index.get(), current_batch_size * sector_len);
+    std::ofstream tmp_edges_bin(tmp_edges_filename, std::ios::binary);
+    if (!tmp_edges_bin) {
+      std::cerr << "Failed to open file: " << tmp_edges_filename << std::endl;
+      std::exit(1);
+    }
+    std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(batch_size * sector_len);
+    unsigned batch_num = partition_number / batch_size + 1;
 
-  // #pragma omp parallel for schedule(dynamic, 1)
-  //     for (unsigned j = 0; j < current_batch_size; j++) {
-  //       if(j % 10000 == 0) std::cout << "j: " << j << " ";
-  //       std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(sector_len);
-  //       memcpy(sector_buf.get(), mem_index.get() + j * sector_len, sector_len);
+    std::cout << "Generating tmp_reverse_edges.bin from original index..." << std::endl;
+    for (unsigned i = 0; i < batch_num; i++) {
+      _u64 current_batch_size = std::min(batch_size, partition_number - i * batch_size);
+      in.read(mem_index.get(), current_batch_size * sector_len);
 
-  //       for (unsigned k = 0; k < C && i * batch_size * C + j * C + k < nd; k++) {
-  //         _u64 node_id = i * batch_size * C + j * C + k;
-  //         std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(max_node_len);
-  //         memcpy(node_buf.get(), sector_buf.get() + k * max_node_len, max_node_len);
+  #pragma omp parallel for schedule(dynamic, 1)
+      for (unsigned j = 0; j < current_batch_size; j++) {
+        std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(sector_len);
+        memcpy(sector_buf.get(), mem_index.get() + j * sector_len, sector_len);
 
-  //         unsigned &nnbr = *(unsigned *)(node_buf.get() + dim * sizeof(T));
-  //         unsigned *nhood_buf = (unsigned *)(node_buf.get() + (dim * sizeof(T)) + sizeof(unsigned));
+        for (unsigned k = 0; k < C && i * batch_size * C + j * C + k < nd; k++) {
+          _u64 node_id = i * batch_size * C + j * C + k;
+          std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(max_node_len);
+          memcpy(node_buf.get(), sector_buf.get() + k * max_node_len, max_node_len);
 
-  // #pragma omp critical
-  //         {
-  //           for (unsigned l = 0; l < nnbr; l++) {
-  //             unsigned dst = nhood_buf[l];
-  //             tmp_edges << dst << " " << node_id << "\n";
-  //           }
-  //         }
-  //       }
-  //     }
-  //     std::cout << std::endl;
-  //   }
-  //   in.close();
-  //   tmp_edges.close();
+          unsigned &nnbr = *(unsigned *)(node_buf.get() + dim * sizeof(T));
+          unsigned *nhood_buf = (unsigned *)(node_buf.get() + (dim * sizeof(T)) + sizeof(unsigned));
 
-  //   std::cout << "Finished extracting edges. Now sorting..." << std::endl;
-  //   system("sort -n -k1,1 /mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/tmp_reverse_edges.txt > /mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/sorted_reverse_edges.txt");
+  #pragma omp critical
+          for (unsigned l = 0; l < nnbr; l++) {
+            unsigned dst = nhood_buf[l];
+            tmp_edges_bin.write(reinterpret_cast<const char *>(&dst), sizeof(unsigned));
+            tmp_edges_bin.write(reinterpret_cast<const char *>(&node_id), sizeof(unsigned));
+          }
+        }
+      }
+      std::cout << "Processed batch " << i << "/" << batch_num << std::endl;
+    }
+    in.close();
+    tmp_edges_bin.close();
 
-    // 第二阶段：顺序构建反向图，同时记录 offset
-    std::ifstream sorted_in("/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/sorted_reverse_edges.txt");
+    std::cout << "Starting external sort..." << std::endl;
+    sort_chunks(tmp_edges_filename, 5ULL << 30, sorted_chunks_dir);
+    
+    if (std::remove(tmp_edges_filename) != 0) {
+      std::cerr << "Warning: failed to delete tmp_reverse_edges.bin" << std::endl;
+    } else {
+      std::cout << "Deleted tmp_reverse_edges.bin after successful sort." << std::endl;
+    }
+
+    std::vector<std::string> chunk_paths;
+    for (size_t i = 0;; ++i) {
+      std::ostringstream oss;
+      oss << std::string(sorted_chunks_dir) << "_chunk_" << i << ".bin";
+      std::ifstream test(oss.str(), std::ios::binary);
+      if (!test) break;
+      chunk_paths.push_back(oss.str());
+    }
+    merge_sorted_chunks(chunk_paths, sorted_reverse_edges_filename);
+
+    std::cout << "Building final reverse index and offset file..." << std::endl;
+    std::ifstream sorted_in(sorted_reverse_edges_filename, std::ios::binary);
     std::ofstream reverse_out(reverse_output_name, std::ios::binary);
     std::ofstream offset_out(offset_output_name, std::ios::binary);
 
     std::vector<uint64_t> offsets(nd, 0);
     uint64_t current_offset = 0;
-
     unsigned current_dst = 0;
     std::vector<unsigned> neighbors;
-    unsigned dst, src;
     _u64 written_nodes = 0;
+    unsigned dst, src;
 
-    while (sorted_in >> dst >> src) {
+    while (sorted_in.read(reinterpret_cast<char *>(&dst), sizeof(unsigned)) &&
+          sorted_in.read(reinterpret_cast<char *>(&src), sizeof(unsigned))) {
       while (written_nodes < dst) {
+        offsets[written_nodes++] = current_offset;
         unsigned degree = 0;
-        offsets[written_nodes] = current_offset;
         reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
         current_offset += sizeof(unsigned);
-        written_nodes++;
       }
 
       if (dst != current_dst) {
         if (!neighbors.empty()) {
-          unsigned degree = neighbors.size();
           offsets[current_dst] = current_offset;
+          unsigned degree = neighbors.size();
           reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
           reverse_out.write(reinterpret_cast<const char *>(neighbors.data()), degree * sizeof(unsigned));
           current_offset += sizeof(unsigned) + degree * sizeof(unsigned);
@@ -396,44 +510,37 @@ class graph_partitioner {
         }
         current_dst = dst;
       }
-
       neighbors.push_back(src);
     }
 
-    // 写最后一个结点
     if (!neighbors.empty()) {
-      unsigned degree = neighbors.size();
       offsets[current_dst] = current_offset;
+      unsigned degree = neighbors.size();
       reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
       reverse_out.write(reinterpret_cast<const char *>(neighbors.data()), degree * sizeof(unsigned));
       current_offset += sizeof(unsigned) + degree * sizeof(unsigned);
       written_nodes++;
     }
 
-    // 补全没有入边的结点
     while (written_nodes < nd) {
-      offsets[written_nodes] = current_offset;
+      offsets[written_nodes++] = current_offset;
       unsigned degree = 0;
       reverse_out.write(reinterpret_cast<const char *>(&degree), sizeof(unsigned));
       current_offset += sizeof(unsigned);
-      written_nodes++;
     }
 
+    offset_out.write(reinterpret_cast<const char *>(offsets.data()), nd * sizeof(uint64_t));
     sorted_in.close();
     reverse_out.close();
-
-    // 写 offset 文件
-    offset_out.write(reinterpret_cast<const char *>(offsets.data()), nd * sizeof(uint64_t));
     offset_out.close();
-
-    std::cout << "Reverse graph written to " << reverse_output_name << std::endl;
+    std::cout << "Reverse index written to " << reverse_output_name << std::endl;
     std::cout << "Offset index written to " << offset_output_name << std::endl;
   }
 
   template <typename T>
   void validate_reverse_graph(const std::string& index_path,
-                            const std::string& reverse_graph_bin="/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_graph.bin",
-                            const std::string& reverse_offset_bin="/mnt/nvme2n1/ronaldo/starling/indices/sift_100m_M32_R48_L128_B6/GP_TIMES_16_LOCK_0_GP_USE_FREQ1_CUT4096_BATCH/reverse_offset.bin") {
+                            const std::string& reverse_graph_bin,
+                            const std::string& reverse_offset_bin) {
     
     std::ifstream rev_graph_in(reverse_graph_bin, std::ios::binary);
     std::ifstream rev_offset_in(reverse_offset_bin, std::ios::binary);
