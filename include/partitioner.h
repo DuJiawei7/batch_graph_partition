@@ -432,7 +432,7 @@ class graph_partitioner {
       _u64 current_batch_size = std::min(batch_size, partition_number - i * batch_size);
       in.read(mem_index.get(), current_batch_size * sector_len);
 
-  #pragma omp parallel for schedule(dynamic, 1)
+  #pragma omp parallel for schedule(dynamic)
       for (unsigned j = 0; j < current_batch_size; j++) {
         std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(sector_len);
         memcpy(sector_buf.get(), mem_index.get() + j * sector_len, sector_len);
@@ -1026,8 +1026,6 @@ class graph_partitioner {
     std::cout << "load batch graph start" << std::endl;
     batch_graph.clear();
     batch_reverse_graph.clear();
-    std::ifstream rev_graph_in(reverse_graph_bin, std::ios::binary);
-    std::ifstream index_in(index_path, std::ios::binary);
     // index_in.seekg(SECTOR_LEN, std::ios::beg);
 
     auto meta_pair = get_disk_index_meta(index_path);
@@ -1050,7 +1048,10 @@ class graph_partitioner {
     batch_graph.resize(cur_batch_size);
     batch_reverse_graph.resize(cur_batch_size);
     // std::cout << "batch graph resize done." << std::endl;
+#pragma omp parallel for schedule(dynamic)
     for(int i = 0; i < cur_batch_size; i++) {
+      std::ifstream rev_graph_in(reverse_graph_bin, std::ios::binary);
+      std::ifstream index_in(index_path, std::ios::binary);
       // std::cout << "i:" << i << std::endl;
       // std::cout << "stream size:" << stream.size() << std::endl;
       // std::cout << "batch_no * batch_size + i:" << batch_no * batch_size + i << std::endl;
@@ -1093,9 +1094,9 @@ class graph_partitioner {
       }
       batch_graph[i].assign(tmp.begin(), tmp.end());
       // std::cout << "batch graph done." << std::endl;
+      index_in.close();
+      rev_graph_in.close();
     }
-    index_in.close();
-    rev_graph_in.close();
     std::cout << "load batch graph done." << "batch graph size:" << batch_graph.size() 
               << ", batch reverse graph size:" << batch_reverse_graph.size() << std::endl;
   }
@@ -1104,7 +1105,7 @@ class graph_partitioner {
   template <typename T>
   void batch_graph_partition(const char *filename, int k, const std::string& index_path,
                               const std::string& reverse_offset_bin, const std::string& reverse_graph_bin, int lock_nums = 0) {
-    unsigned batch_size = 5000000;
+    unsigned batch_size = 100000000;
     unsigned batch_num = (_nd + batch_size - 1) / batch_size;
 
     std::ifstream rev_offset_in(reverse_offset_bin, std::ios::binary);
@@ -1134,10 +1135,12 @@ class graph_partitioner {
     }
 
     std::cout << "init_stream over" << ", init_stream size:" << init_stream.size() << std::endl;
-    for(int i = 0; i < 10; i++) {
-      std::cout << "init_stream[" << i << "]:" << init_stream[i] << " ";
-    }
-    std::cout << std::endl;
+    _freq_list.clear();
+    _freq_nei_list.clear();
+    // for(int i = 0; i < 10; i++) {
+    //   std::cout << "init_stream[" << i << "]:" << init_stream[i] << " ";
+    // }
+    // std::cout << std::endl;
 
     _lock_nodes.clear();
     _lock_pids.clear();
@@ -1208,10 +1211,10 @@ class graph_partitioner {
 
     std::cout << "init over." << std::endl;
 
-    for(int i = 0; i < 10; i++) {
-      std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
-    }
-    std::cout << std::endl;
+    // for(int i = 0; i < 10; i++) {
+    //   std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+    // }
+    // std::cout << std::endl;
 
     // print_memory_breakdown();
     for (int i = 0; i < k; i++) {
@@ -1231,11 +1234,11 @@ class graph_partitioner {
       // 使用固定种子初始化随机引擎
       std::default_random_engine rng(42 + i);  // 42 是一个示例，你可以用任何固定的整数
       std::shuffle(stream.begin(), stream.end(), rng);
-      std::cout << "stream: ";
-      for(int j = 0; j < 10; j++) {
-        std::cout << stream[j] << " ";
-      }
-      std::cout << std::endl;
+      // std::cout << "stream: ";
+      // for(int j = 0; j < 10; j++) {
+      //   std::cout << stream[j] << " ";
+      // }
+      // std::cout << std::endl;
 
       auto start = omp_get_wtime();
       // int* loc = new int[_nd];  // 动态分配
@@ -1243,20 +1246,20 @@ class graph_partitioner {
       for(int j = 0; j < batch_num; j++){
         std::cout << "batch " << j << " start" << std::endl;
         load_batch_graph<T>(j, batch_size, stream, index_path, offsets, reverse_graph_bin);
-        if(j == 0) {
-          for(int r = 0; r < 5; r++) {
-            std::cout << "batch_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
-            for(int t = 0; t < batch_graph[r].size(); t++)
-              std::cout << batch_graph[r][t] << " ";
-            std::cout << std::endl;
-          }
-          for(int r = 0; r < 5; r++) {
-            std::cout << "batch_reverse_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
-            for(int t = 0; t < batch_reverse_graph[r].size(); t++)
-              std::cout << batch_reverse_graph[r][t] << " ";
-            std::cout << std::endl;
-          }
-        }
+        // if(j == 0) {
+        //   for(int r = 0; r < 5; r++) {
+        //     std::cout << "batch_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
+        //     for(int t = 0; t < batch_graph[r].size(); t++)
+        //       std::cout << batch_graph[r][t] << " ";
+        //     std::cout << std::endl;
+        //   }
+        //   for(int r = 0; r < 5; r++) {
+        //     std::cout << "batch_reverse_graph " << r << "(" << stream[j * batch_size + r] << "):" ;
+        //     for(int t = 0; t < batch_reverse_graph[r].size(); t++)
+        //       std::cout << batch_reverse_graph[r][t] << " ";
+        //     std::cout << std::endl;
+        //   }
+        // }
         batch_graph_partition_LDG(j, batch_size, stream);
       }
       auto end = omp_get_wtime();
@@ -1271,10 +1274,10 @@ class graph_partitioner {
       auto ivf_file_name = std::string(filename) + std::string(".ivf") + std::to_string(i + 1);
       std::cout << "total ivf time: " << ivf_time << std::endl;
       save_partition(ivf_file_name.c_str());
-      for(int i = 0; i < 10; i++) {
-        std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
-      }
-      std::cout << std::endl;
+      // for(int i = 0; i < 10; i++) {
+      //   std::cout << "id2page[" << i << "]:" << id2pid[i] << " ";
+      // }
+      // std::cout << std::endl;
     }
     save_partition(filename);
     std::cout << "select pid nums" << select_nums << " get unfilled partition nums: " << getUnfilled_nums << std::endl;
@@ -1317,7 +1320,7 @@ class graph_partitioner {
       std::cout << std::endl;
     }
 
-#pragma omp parallel for schedule(static, 1)
+#pragma omp parallel for schedule(dynamic)
     for (unsigned i = 0; i < _nd; i++) {
       if(i % 10000 == 0) std::cout << "sync " << i << "/" << _nd << std::endl;
       size_t n = stream[i];
@@ -1339,10 +1342,10 @@ class graph_partitioner {
   }
 
   void batch_graph_partition_LDG(int batch_i, int batch_size, std::vector<unsigned> &stream) {
-#pragma omp parallel for schedule(static, 1)
+#pragma omp parallel for schedule(dynamic)
     for (unsigned i = 0; i < batch_size; i++) {
       if(batch_i * batch_size + i >= _nd) continue;
-      if((batch_i * batch_size + i) % 10000 == 0) std::cout << "sync " << batch_i * batch_size + i << "/" << _nd << std::endl;
+      if((batch_i * batch_size + i) % 100000 == 0) std::cout << "sync " << batch_i * batch_size + i << "/" << _nd << std::endl;
       size_t n = stream[batch_i * batch_size + i];
       // std::cout << n << " ";
       // if (_lock_nodes[n]) continue;

@@ -75,13 +75,21 @@ int main(int argc, char **argv) {
   //           << ", sorted chunks dir: " << sorted_chunks_dir
   //           << ", sorted reverse edges filename: " << sorted_reverse_edges_filename
   //           << std::endl;
-  // partitioner.batch_write_reverse_index_with_offset<uint8_t>(index_file.c_str(), reverse_graph_bin.c_str(), 
-  //                                                           reverse_offset_bin.c_str(), tmp_edges_filename.c_str(), sorted_chunks_dir.c_str(),
-  //                                                           sorted_reverse_edges_filename.c_str());                      
+  partitioner.batch_write_reverse_index_with_offset<uint8_t>(index_file.c_str(), reverse_graph_bin.c_str(), 
+                                                            reverse_offset_bin.c_str(), tmp_edges_filename.c_str(), sorted_chunks_dir.c_str(),
+                                                            sorted_reverse_edges_filename.c_str());                      
   // partitioner.validate_reverse_graph<uint8_t>(index_file.c_str(), reverse_graph_bin, reverse_offset_bin);
-  if(use_batch)
-    partitioner.batch_graph_partition<uint8_t>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
-  else
-    partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  // if(use_batch) {
+  //   if (std::string(data_type) == std::string("uint8")) {
+  //     partitioner.batch_graph_partition<uint8_t>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
+  //   } else if (std::string(data_type) == std::string("float")) {
+  //     partitioner.batch_graph_partition<float>(gp_file.c_str(), ldg_times, index_file.c_str(), reverse_offset_bin, reverse_graph_bin, lock_nums);
+  //   } else {
+  //     std::cout << "not support type" << std::endl;
+  //     exit(-1);
+  //   }
+  // }
+  // else
+  //   partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
   return 0;
 }
